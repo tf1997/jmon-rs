@@ -1,3 +1,20 @@
+//! # JMon-rs
+//!
+//! `jmon-rs` is a high-performance, cross-platform JVM monitoring library.
+//! It retrieves real-time JVM metrics (GC, class loading, memory, etc.) by
+//! parsing `hsperfdata` memory-mapped files.
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use jmon_rs::JvmMonitor;
+//!
+//! let pid = 12345;
+//! let monitor = JvmMonitor::connect(pid).expect("Failed to connect");
+//! let gc = monitor.get_gc_stats();
+//! println!("Eden Used: {} KB", gc.eu);
+//! ```
+
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashMap;
@@ -5,11 +22,14 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
-/// Error types
+/// Error types for JVM Monitoring operations.
 #[derive(Debug)]
 pub enum JvmMonitorError {
+    /// The specified JVM process ID was not found or access was denied.
     ProcessNotFound(u32),
+    /// Standard I/O error occurred during file access or mapping.
     IoError(std::io::Error),
+    /// The hsperfdata file format is invalid or corrupted.
     InvalidFormat(String),
 }
 
@@ -33,10 +53,12 @@ impl From<std::io::Error> for JvmMonitorError {
     }
 }
 
-/// Raw value type from hsperfdata
+/// Represents a raw performance counter value from the JVM.
 #[derive(Debug, Clone)]
 pub enum PerfValue {
+    /// A 64-bit integer value (e.g., counters, sizes, timestamps).
     Long(i64),
+    /// A string value (e.g., version strings, GC causes).
     String(String),
 }
 
@@ -48,25 +70,38 @@ struct EntryMeta {
     vector_length: usize,
 }
 
-/// Info struct for auto-discovered processes (like jps)
+/// Information about a discovered Java process, similar to the output of `jps`.
 #[derive(Debug, Clone)]
 pub struct JavaProcessInfo {
+    /// The process ID (PID) of the JVM.
     pub pid: u32,
-    pub name: String,     // Short name (Main Class or Jar)
-    pub command: String,  // Full command line
-    pub uptime_s: u64,    // Uptime in seconds
+    /// Short name of the application (e.g., the Main class or JAR filename).
+    pub name: String,
+    /// The full Java command line used to launch the process.
+    pub command: String,
+    /// Approximate uptime of the JVM process in seconds.
+    pub uptime_s: u64,
 }
 
-/// The main JVM Monitor instance
+/// The main JVM Monitor instance.
+///
+/// Use `JvmMonitor::connect(pid)` to start monitoring a specific process,
+/// or `JvmMonitor::discover_all()` to find all running JVMs.
 pub struct JvmMonitor {
     mmap: Mmap,
     is_little_endian: bool,
     index: HashMap<String, EntryMeta>,
-    timer_frequency: f64, // Cached frequency for time conversion
+    timer_frequency: f64,
 }
 
 impl JvmMonitor {
-    /// Connects to a running JVM process
+    /// Connects to a running JVM process by its PID.
+    ///
+    /// This will attempt to find and memory-map the `hsperfdata` file for the given PID.
+    ///
+    /// # Errors
+    /// Returns `JvmMonitorError::ProcessNotFound` if the process is not found.
+    /// Returns `JvmMonitorError::InvalidFormat` if the data file is corrupted.
     pub fn connect(pid: u32) -> Result<Self, JvmMonitorError> {
         let path = Self::find_hsperfdata_file(pid).ok_or(JvmMonitorError::ProcessNotFound(pid))?;
 
@@ -140,7 +175,9 @@ impl JvmMonitor {
         Ok(monitor)
     }
 
-    /// Read raw metric value
+    /// Reads a raw performance counter value by its full internal name (e.g., "sun.gc.cause").
+    ///
+    /// Returns `None` if the key does not exist or the data type is unsupported.
     pub fn read_metric(&self, key: &str) -> Option<PerfValue> {
         let meta = self.index.get(key)?;
         let start = meta.data_offset;
@@ -164,7 +201,7 @@ impl JvmMonitor {
         }
     }
 
-    // Helper: Read Long (i64), return 0 if missing
+    /// Reads a 64-bit integer metric. Returns `0` if the key is missing or not a long.
     pub fn read_long(&self, key: &str) -> i64 {
         if let Some(PerfValue::Long(v)) = self.read_metric(key) {
             v
@@ -173,12 +210,14 @@ impl JvmMonitor {
         }
     }
 
-    // Helper: Read Float (f64), return 0.0 if missing
+    /// Reads a metric as a double-precision float.
+    ///
+    /// Note: Most JVM counters are stored as `i64`, this method casts them to `f64`.
     pub fn read_f64(&self, key: &str) -> f64 {
         self.read_long(key) as f64
     }
 
-    // Helper: Read String, return "-" if missing
+    /// Reads a string metric. Returns `"-"` if the key is missing or not a string.
     pub fn read_string(&self, key: &str) -> String {
         if let Some(PerfValue::String(v)) = self.read_metric(key) {
             v
@@ -215,7 +254,7 @@ impl JvmMonitor {
     // Public API: High Level Stats
     // ==========================================
 
-    /// Get Class Loading Statistics (jstat -class)
+    /// Retrieves class loading statistics, equivalent to `jstat -class`.
     pub fn get_class_stats(&self) -> ClassStats {
         ClassStats {
             loaded: self.read_long("java.cls.loadedClasses"),
@@ -226,7 +265,7 @@ impl JvmMonitor {
         }
     }
 
-    /// Get JIT Compiler Statistics (jstat -compiler)
+    /// Retrieves JIT compiler statistics, equivalent to `jstat -compiler`.
     pub fn get_compiler_stats(&self) -> CompilerStats {
         CompilerStats {
             compiled: self.read_long("sun.ci.totalCompilations"),
@@ -238,7 +277,7 @@ impl JvmMonitor {
         }
     }
 
-    /// Get Full GC Statistics (jstat -gc / -gccause / -gcutil)
+    /// Retrieves garbage collection statistics, equivalent to `jstat -gc` or `jstat -gccause`.
     pub fn get_gc_stats(&self) -> GcStats {
         let s0c = self.read_long_first_available(&[
             "sun.gc.generation.0.space.1.capacity",
@@ -314,6 +353,7 @@ impl JvmMonitor {
         }
     }
 
+    /// Retrieves various runtime statistics including threads, code cache, and safepoints.
     pub fn get_runtime_stats(&self) -> RuntimeStats {
         // 1. Threads
         let t_live = self.read_long("java.threads.live");
@@ -374,6 +414,9 @@ impl JvmMonitor {
         }
     }
 
+    /// Discovers all active JVM processes on the system that have performance counters enabled.
+    ///
+    /// Returns a list of `JavaProcessInfo` containing PID and command line details.
     pub fn discover_all() -> Result<Vec<JavaProcessInfo>, JvmMonitorError> {
         let base_dir = Self::get_temp_root();
         let mut processes = Vec::new();
@@ -473,99 +516,112 @@ impl JvmMonitor {
         }
         None
     }
-
-    fn scan_temp_dir(base_dir: PathBuf, pid: u32) -> Option<PathBuf> {
-        let pid_str = pid.to_string();
-        if let Ok(entries) = fs::read_dir(&base_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
-                        if folder_name.starts_with("hsperfdata_") {
-                            let target_file = path.join(&pid_str);
-                            if target_file.exists() {
-                                return Some(target_file);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 // ================= Data Structures =================
 
-/// jstat -class
+/// Class loading statistics.
 #[derive(Debug, Clone, Default)]
 pub struct ClassStats {
+    /// Number of classes loaded.
     pub loaded: i64,
-    pub bytes: f64, // KB
+    /// Total size of classes loaded (KB).
+    pub bytes: f64,
+    /// Number of classes unloaded.
     pub unloaded: i64,
-    pub unloaded_bytes: f64, // KB
-    pub time: f64,           // Seconds
+    /// Total size of classes unloaded (KB).
+    pub unloaded_bytes: f64,
+    /// Time spent in class loading (seconds).
+    pub time: f64,
 }
 
-/// jstat -compiler
+/// JIT compiler statistics.
 #[derive(Debug, Clone, Default)]
 pub struct CompilerStats {
+    /// Total number of compilations performed.
     pub compiled: i64,
+    /// Total number of failed compilations.
     pub failed: i64,
+    /// Total number of invalidated compilations.
     pub invalid: i64,
-    pub time: f64, // Seconds
+    /// Total time spent in compilation (seconds).
+    pub time: f64,
+    /// Type of the last failed compilation.
     pub failed_type: String,
+    /// Name of the last failed method.
     pub failed_method: String,
 }
 
-/// jstat -gc / -gccause
+/// Garbage Collection statistics.
 #[derive(Debug, Clone, Default)]
 pub struct GcStats {
-    // Survivor
+    /// Survivor space 0 capacity (KB).
     pub s0c: f64,
+    /// Survivor space 1 capacity (KB).
     pub s1c: f64,
+    /// Survivor space 0 used (KB).
     pub s0u: f64,
+    /// Survivor space 1 used (KB).
     pub s1u: f64,
-    // Eden
+    /// Eden space capacity (KB).
     pub ec: f64,
+    /// Eden space used (KB).
     pub eu: f64,
-    // Old
+    /// Old space capacity (KB).
     pub oc: f64,
+    /// Old space used (KB).
     pub ou: f64,
-    // Metaspace / Compressed Class
+    /// Metaspace capacity (KB).
     pub mc: f64,
+    /// Metaspace used (KB).
     pub mu: f64,
+    /// Compressed class space capacity (KB).
     pub ccsc: f64,
+    /// Compressed class space used (KB).
     pub ccsu: f64,
-    // Events
+    /// Number of young generation GC events.
     pub ygc: u64,
+    /// Total time spent in young generation GC (seconds).
     pub ygct: f64,
+    /// Number of full GC events.
     pub fgc: u64,
+    /// Total time spent in full GC (seconds).
     pub fgct: f64,
+    /// Number of concurrent GC events (e.g., ZGC, Shenandoah).
     pub cgc: u64,
-    pub cgct: f64, // Concurrent GC (ZGC/Shenandoah)
+    /// Total time spent in concurrent GC (seconds).
+    pub cgct: f64,
+    /// Total garbage collection time (seconds).
     pub gct: f64,
-    // Causes
-    pub lgcc: String, // Last GC Cause
-    pub gcc: String,  // Current GC Cause
+    /// Last GC cause.
+    pub lgcc: String,
+    /// Current GC cause.
+    pub gcc: String,
 }
 
-/// JVM Runtime / Threads / Safepoint Statistics
+/// JVM Runtime, Threads, and Safepoint statistics.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeStats {
-    // Threads
+    /// Number of live threads.
     pub threads_live: i64,
+    /// Number of daemon threads.
     pub threads_daemon: i64,
+    /// Peak number of threads.
     pub threads_peak: i64,
 
-    // Code Cache (JIT Memory)
-    pub code_cache_used: f64,        // KB
-    pub code_cache_capacity: f64,    // KB
-    pub code_cache_utilization: f64, // Percentage (0.0 - 1.0)
+    /// Code Cache memory used (KB).
+    pub code_cache_used: f64,
+    /// Code Cache total capacity (KB).
+    pub code_cache_capacity: f64,
+    /// Code Cache utilization ratio (0.0 to 1.0).
+    pub code_cache_utilization: f64,
 
-    // Safepoints (STW Pauses)
+    /// Total number of safepoints reached.
     pub safepoints: i64,
-    pub safepoint_time_s: f64,   // Seconds
-    pub app_time_s: f64,         // Seconds
-    pub safepoint_overhead: f64, // Percentage (0.0 - 1.0)
+    /// Total time spent in safepoints (seconds).
+    pub safepoint_time_s: f64,
+    /// Total time spent running the application (seconds).
+    pub app_time_s: f64,
+    /// Percentage of time spent in safepoints (0.0 to 1.0).
+    pub safepoint_overhead: f64,
 }
