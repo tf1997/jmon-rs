@@ -17,7 +17,7 @@
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use memmap2::{Mmap, MmapOptions};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -77,10 +77,6 @@ pub struct JavaProcessInfo {
     pub pid: u32,
     /// Short name of the application (e.g., the Main class or JAR filename).
     pub name: String,
-    /// The full Java command line used to launch the process.
-    pub command: String,
-    /// Approximate uptime of the JVM process in seconds.
-    pub uptime_s: u64,
 }
 
 /// The main JVM Monitor instance.
@@ -102,77 +98,234 @@ impl JvmMonitor {
     /// # Errors
     /// Returns `JvmMonitorError::ProcessNotFound` if the process is not found.
     /// Returns `JvmMonitorError::InvalidFormat` if the data file is corrupted.
-    pub fn connect(pid: u32) -> Result<Self, JvmMonitorError> {
-        let path = Self::find_hsperfdata_file(pid).ok_or(JvmMonitorError::ProcessNotFound(pid))?;
+    pub fn connect(host_pid: u32) -> Result<Self, JvmMonitorError> {
+        let path = Self::find_hsperfdata_file(host_pid)
+            .ok_or(JvmMonitorError::ProcessNotFound(host_pid))?;
 
         let file = fs::File::open(&path)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-        if mmap.len() < 32 {
-            return Err(JvmMonitorError::InvalidFormat("File too small".into()));
+        if mmap.len() < 32 || BigEndian::read_u32(&mmap[0..4]) != 0xcafec0c0 {
+            return Err(JvmMonitorError::InvalidFormat(
+                "Invalid magic number".into(),
+            ));
         }
 
-        let magic = BigEndian::read_u32(&mmap[0..4]);
-        if magic != 0xcafec0c0 {
-            return Err(JvmMonitorError::InvalidFormat("Bad magic number".into()));
-        }
-
-        let is_little_endian = mmap[4] == 1;
-        let entry_offset = Self::read_u32(&mmap[24..28], is_little_endian) as usize;
-        let num_entries = Self::read_u32(&mmap[28..32], is_little_endian) as usize;
+        let is_le = mmap[4] == 1;
+        let entry_offset = Self::read_u32(&mmap[24..28], is_le) as usize;
+        let num_entries = Self::read_u32(&mmap[28..32], is_le) as usize;
 
         let mut index = HashMap::with_capacity(num_entries);
-        let mut current_offset = entry_offset;
+        let mut cursor = entry_offset;
 
         for _ in 0..num_entries {
-            if current_offset + 20 > mmap.len() {
+            if cursor + 20 > mmap.len() {
                 break;
             }
-            let entry_length =
-                Self::read_u32(&mmap[current_offset..current_offset + 4], is_little_endian)
-                    as usize;
-            let name_offset = Self::read_u32(
-                &mmap[current_offset + 4..current_offset + 8],
-                is_little_endian,
-            ) as usize;
-            let vector_length = Self::read_u32(
-                &mmap[current_offset + 8..current_offset + 12],
-                is_little_endian,
-            ) as usize;
-            let data_type = mmap[current_offset + 12];
-            let data_offset = Self::read_u32(
-                &mmap[current_offset + 16..current_offset + 20],
-                is_little_endian,
-            ) as usize;
+            let entry_len = Self::read_u32(&mmap[cursor..cursor + 4], is_le) as usize;
+            let name_offset = Self::read_u32(&mmap[cursor + 4..cursor + 8], is_le) as usize;
+            let vector_len = Self::read_u32(&mmap[cursor + 8..cursor + 12], is_le) as usize;
+            let data_type = mmap[cursor + 12];
+            let data_offset = Self::read_u32(&mmap[cursor + 16..cursor + 20], is_le) as usize;
 
-            let name_start = current_offset + name_offset;
-            let mut name_end = name_start;
-            while name_end < mmap.len() && mmap[name_end] != 0 {
-                name_end += 1;
+            let n_start = cursor + name_offset;
+            let mut n_end = n_start;
+            while n_end < mmap.len() && mmap[n_end] != 0 {
+                n_end += 1;
             }
-            let name = String::from_utf8_lossy(&mmap[name_start..name_end]).into_owned();
+            let name = String::from_utf8_lossy(&mmap[n_start..n_end]).into_owned();
 
             index.insert(
                 name,
                 EntryMeta {
                     data_type,
-                    data_offset: current_offset + data_offset,
-                    vector_length,
+                    data_offset: cursor + data_offset,
+                    vector_length: vector_len,
                 },
             );
-
-            current_offset += entry_length;
+            cursor += entry_len;
         }
 
         let mut monitor = Self {
             mmap,
-            is_little_endian,
+            is_little_endian: is_le,
             index,
             timer_frequency: 0.0,
         };
-        // Cache the timer frequency for time conversions
         monitor.timer_frequency = monitor.read_long("sun.os.hrt.frequency") as f64;
         Ok(monitor)
+    }
+
+    /// Discovers all Java processes. Supports Host and Container (Docker/K8s) PIDs.
+    pub fn discover_all() -> Result<Vec<JavaProcessInfo>, JvmMonitorError> {
+        let mut processes = Vec::new();
+        let mut seen_host_pids = HashSet::new();
+
+        // --- 1. Linux Specific: Container discovery via /proc ---
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(entries) = fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let pid_str = entry.file_name().to_string_lossy().into_owned();
+                    if pid_str.chars().all(|c| c.is_ascii_digit()) {
+                        let host_pid: u32 = pid_str.parse().unwrap_or(0);
+                        if host_pid == 0 || seen_host_pids.contains(&host_pid) {
+                            continue;
+                        }
+
+                        if let Some(ns_pid) = Self::get_ns_pid(host_pid) {
+                            let container_tmp =
+                                PathBuf::from("/proc").join(&pid_str).join("root/tmp");
+                            if let Some(path) = Self::find_perf_file_in_dir(&container_tmp, ns_pid)
+                            {
+                                if let Some(name) = Self::fast_extract_name(&path) {
+                                    processes.push(JavaProcessInfo {
+                                        pid: host_pid,
+                                        name,
+                                    });
+                                    seen_host_pids.insert(host_pid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 2. Windows/macOS/Linux Host: Direct path and fallback scan ---
+        let base_tmp = Self::get_temp_root();
+
+        // Fast path: Target current user folder directly to avoid large directory scans (especially on Windows)
+        let user_env = if cfg!(windows) { "USERNAME" } else { "USER" };
+        if let Ok(user) = std::env::var(user_env) {
+            let user_dir = base_tmp.join(format!("hsperfdata_{}", user));
+            Self::scan_pids_in_folder(&user_dir, &mut processes, &mut seen_host_pids);
+        }
+
+        // Fallback: Scan base temp directory for other users' hsperfdata folders
+        if processes.is_empty() {
+            if let Ok(entries) = fs::read_dir(&base_tmp) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir()
+                        && path
+                            .file_name()
+                            .map_or(false, |n| n.to_string_lossy().starts_with("hsperfdata_"))
+                    {
+                        Self::scan_pids_in_folder(&path, &mut processes, &mut seen_host_pids);
+                    }
+                }
+            }
+        }
+
+        processes.sort_by_key(|p| p.pid);
+        Ok(processes)
+    }
+
+    fn scan_pids_in_folder(
+        folder: &PathBuf,
+        results: &mut Vec<JavaProcessInfo>,
+        seen: &mut HashSet<u32>,
+    ) {
+        if let Ok(p_entries) = fs::read_dir(folder) {
+            for p_entry in p_entries.flatten() {
+                if let Ok(pid) = p_entry.file_name().to_string_lossy().parse::<u32>() {
+                    if !seen.contains(&pid) {
+                        if let Some(name) = Self::fast_extract_name(&p_entry.path()) {
+                            results.push(JavaProcessInfo { pid, name });
+                            seen.insert(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // Internal Path and PID Resolution
+    // ==========================================
+
+    #[cfg(target_os = "linux")]
+    fn get_ns_pid(host_pid: u32) -> Option<u32> {
+        use std::io::{BufRead, BufReader};
+        let file = fs::File::open(format!("/proc/{}/status", host_pid)).ok()?;
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if line.starts_with("NSpid:") {
+                return line.split_whitespace().last().and_then(|s| s.parse().ok());
+            }
+        }
+        None
+    }
+
+    fn find_hsperfdata_file(host_pid: u32) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            let ns_pid = Self::get_ns_pid(host_pid).unwrap_or(host_pid);
+            let container_tmp = PathBuf::from("/proc")
+                .join(host_pid.to_string())
+                .join("root/tmp");
+            if let Some(p) = Self::find_perf_file_in_dir(&container_tmp, ns_pid) {
+                return Some(p);
+            }
+        }
+
+        let base_tmp = Self::get_temp_root();
+        Self::find_perf_file_in_dir(&base_tmp, host_pid)
+    }
+
+    fn find_perf_file_in_dir(base_path: &PathBuf, target_pid: u32) -> Option<PathBuf> {
+        let pid_str = target_pid.to_string();
+        let entries = fs::read_dir(base_path).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && path
+                    .file_name()
+                    .map_or(false, |n| n.to_string_lossy().starts_with("hsperfdata_"))
+            {
+                let perf_file = path.join(&pid_str);
+                if perf_file.exists() {
+                    return Some(perf_file);
+                }
+            }
+        }
+        None
+    }
+
+    fn fast_extract_name(path: &PathBuf) -> Option<String> {
+        let file = fs::File::open(path).ok()?;
+        let mmap = unsafe { MmapOptions::new().map(&file).ok()? };
+        if mmap.len() < 32 || &mmap[0..4] != &[0xca, 0xfe, 0xc0, 0xc0] {
+            return None;
+        }
+
+        let is_le = mmap[4] == 1;
+        let entry_offset = Self::read_u32(&mmap[24..28], is_le) as usize;
+        let num_entries = Self::read_u32(&mmap[28..32], is_le) as usize;
+        let mut cursor = entry_offset;
+        let target = b"sun.rt.javaCommand";
+
+        for _ in 0..num_entries {
+            if cursor + 20 > mmap.len() {
+                break;
+            }
+            let entry_len = Self::read_u32(&mmap[cursor..cursor + 4], is_le) as usize;
+            let name_offset = Self::read_u32(&mmap[cursor + 4..cursor + 8], is_le) as usize;
+            let data_offset = Self::read_u32(&mmap[cursor + 16..cursor + 20], is_le) as usize;
+
+            let n_start = cursor + name_offset;
+            if n_start + 18 <= mmap.len() && &mmap[n_start..n_start + 18] == target {
+                let d_start = cursor + data_offset;
+                let mut d_end = d_start;
+                while d_end < mmap.len() && mmap[d_end] != 0 && mmap[d_end] != b' ' {
+                    d_end += 1;
+                }
+                return Some(String::from_utf8_lossy(&mmap[d_start..d_end]).into_owned());
+            }
+            cursor += entry_len;
+        }
+        None
     }
 
     /// Reads a raw performance counter value by its full internal name (e.g., "sun.gc.cause").
@@ -414,62 +567,6 @@ impl JvmMonitor {
         }
     }
 
-    /// Discovers all active JVM processes on the system that have performance counters enabled.
-    ///
-    /// Returns a list of `JavaProcessInfo` containing PID and command line details.
-    pub fn discover_all() -> Result<Vec<JavaProcessInfo>, JvmMonitorError> {
-        let base_dir = Self::get_temp_root();
-        let mut processes = Vec::new();
-
-        // Ensure base directory exists
-        if !base_dir.exists() {
-            return Ok(processes);
-        }
-
-        let entries = fs::read_dir(&base_dir).map_err(JvmMonitorError::IoError)?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() { continue; }
-
-            // Find directories starting with "hsperfdata_"
-            if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
-                if folder_name.starts_with("hsperfdata_") {
-                    // Iterate through PIDs inside
-                    if let Ok(pid_entries) = fs::read_dir(&path) {
-                        for pid_entry in pid_entries.flatten() {
-                            let pid_path = pid_entry.path();
-                            if let Some(pid_str) = pid_path.file_name().and_then(|n| n.to_str()) {
-                                if let Ok(pid) = pid_str.parse::<u32>() {
-                                    // Try to connect to get details
-                                    if let Ok(monitor) = Self::connect(pid) {
-                                        let cmd = monitor.read_string("sun.rt.javaCommand");
-                                        // Extract main class or jar name
-                                        let short_name = cmd.split_whitespace().next().unwrap_or("Unknown").to_string();
-                                        
-                                        // Calculate approximate uptime
-                                        let uptime = monitor.to_seconds(monitor.read_long("sun.rt.applicationTime")) as u64;
-
-                                        processes.push(JavaProcessInfo {
-                                            pid,
-                                            name: short_name,
-                                            command: cmd,
-                                            uptime_s: uptime,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Sort by PID
-        processes.sort_by_key(|k| k.pid);
-        Ok(processes)
-    }
-
     fn read_u32(bytes: &[u8], is_le: bool) -> u32 {
         if is_le {
             LittleEndian::read_u32(bytes)
@@ -486,35 +583,19 @@ impl JvmMonitor {
         }
     }
 
-   #[cfg(target_os = "linux")]
-    fn get_temp_root() -> PathBuf { PathBuf::from("/tmp") }
+    #[cfg(target_os = "linux")]
+    fn get_temp_root() -> PathBuf {
+        PathBuf::from("/tmp")
+    }
 
     #[cfg(target_os = "macos")]
-    fn get_temp_root() -> PathBuf { std::env::temp_dir() }
+    fn get_temp_root() -> PathBuf {
+        std::env::temp_dir()
+    }
 
     #[cfg(target_os = "windows")]
-    fn get_temp_root() -> PathBuf { std::env::temp_dir() }
-
-    fn find_hsperfdata_file(pid: u32) -> Option<PathBuf> {
-        let base_dir = Self::get_temp_root();
-        let pid_str = pid.to_string();
-
-        if let Ok(entries) = fs::read_dir(&base_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
-                        if folder_name.starts_with("hsperfdata_") {
-                            let target_file = path.join(&pid_str);
-                            if target_file.exists() {
-                                return Some(target_file);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
+    fn get_temp_root() -> PathBuf {
+        std::env::temp_dir()
     }
 }
 

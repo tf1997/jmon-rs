@@ -48,8 +48,8 @@ fn run_discovery_mode() {
                 return;
             }
 
-            println!("{:<8} | {:<25} | {:<10} | {:<10} | {:<10} | {:<10}", 
-                "PID", "Name", "Uptime", "Heap Used", "Live Thr", "GC Time");
+            println!("{:<8} | {:<25} | {:<10} | {:<10} | {:<10}", 
+                "PID", "Name", "Heap Used", "Live Thr", "GC Time");
             println!("{}", "-".repeat(90));
 
             for proc in processes {
@@ -66,16 +66,14 @@ fn run_discovery_mode() {
                     ("-".to_string(), "-".to_string(), "-".to_string())
                 };
 
-                let uptime_str = format_duration(proc.uptime_s);
-
                 let name_display = if proc.name.len() > 25 { 
                     format!("{}...", &proc.name[..22]) 
                 } else { 
                     proc.name.clone() 
                 };
 
-                println!("{:<8} | {:<25} | {:<10} | {:<10} | {:<10} | {:<10}", 
-                    proc.pid, name_display, uptime_str, heap_display, threads_live, gc_time_s);
+                println!("{:<8} | {:<25} | {:<10} | {:<10} | {:<10}", 
+                    proc.pid, name_display, heap_display, threads_live, gc_time_s);
             }
             println!("{}", "-".repeat(90));
             println!("* Tip: Run 'jmon <PID>' to see detailed metrics.");
@@ -146,16 +144,6 @@ fn run_monitor_mode(pid: u32, interval: u64) {
         
         io::stdout().flush().unwrap();
         thread::sleep(Duration::from_secs(interval));
-    }
-}
-
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
