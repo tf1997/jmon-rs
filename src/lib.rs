@@ -236,6 +236,57 @@ impl JvmMonitor {
             gcc: self.read_string("sun.gc.cause"),
         }
     }
+
+    pub fn get_runtime_stats(&self) -> RuntimeStats {
+        // 1. Threads
+        let t_live = self.read_long("java.threads.live");
+        let t_daemon = self.read_long("java.threads.daemon");
+        let mut t_peak = self.read_long("java.threads.peak");
+        if t_peak == 0 {
+            t_peak = self.read_long("java.threads.peakCount");
+        }
+        if t_peak == 0 {
+            t_peak = self.read_long("java.threads.livePeak");
+        }
+        if t_peak == 0 {
+             t_peak = t_live;
+        }
+
+        // 2. Code Cache
+        // note：sun.ci.codeCache or sun.ci.codeCache.maxSize
+        let cc_used = self.to_kb(self.read_long("sun.ci.codeCache.used"));
+        let cc_cap = self.to_kb(self.read_long("sun.ci.codeCache.capacity")); 
+        
+        let cc_util = if cc_cap > 0.0 { cc_used / cc_cap } else { 0.0 };
+
+        // 3. Safepoints
+        let safepoint_ticks = self.read_long("sun.rt.safepointTime");
+        let app_ticks = self.read_long("sun.rt.applicationTime");
+        let safepoints = self.read_long("sun.rt.safepoints");
+
+        let safepoint_time_s = self.to_seconds(safepoint_ticks);
+        let app_time_s = self.to_seconds(app_ticks);
+        
+        let total_ticks = safepoint_ticks + app_ticks;
+        let overhead = if total_ticks > 0 {
+            safepoint_ticks as f64 / total_ticks as f64
+        } else {
+            0.0
+        };
+
+        RuntimeStats {
+            threads_live: t_live,
+            threads_daemon: t_daemon,
+            threads_peak: t_peak,
+            code_cache_used: cc_used,
+            code_cache_capacity: cc_cap,
+            code_cache_utilization: cc_util,
+            safepoints,
+            safepoint_time_s,
+            app_time_s,
+            safepoint_overhead: overhead,
+        }
+    }
     
 
     fn read_u32(bytes: &[u8], is_le: bool) -> u32 {
@@ -325,4 +376,24 @@ pub struct GcStats {
     // Causes
     pub lgcc: String, // Last GC Cause
     pub gcc: String,  // Current GC Cause
+}
+
+/// JVM Runtime / Threads / Safepoint Statistics
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeStats {
+    // Threads
+    pub threads_live: i64,
+    pub threads_daemon: i64,
+    pub threads_peak: i64,
+
+    // Code Cache (JIT Memory)
+    pub code_cache_used: f64,      // KB
+    pub code_cache_capacity: f64,  // KB
+    pub code_cache_utilization: f64, // Percentage (0.0 - 1.0)
+
+    // Safepoints (STW Pauses)
+    pub safepoints: i64,
+    pub safepoint_time_s: f64,     // Seconds
+    pub app_time_s: f64,           // Seconds
+    pub safepoint_overhead: f64,   // Percentage (0.0 - 1.0)
 }
