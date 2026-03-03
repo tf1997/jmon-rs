@@ -16,7 +16,9 @@ pub enum JvmMonitorError {
 impl fmt::Display for JvmMonitorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JvmMonitorError::ProcessNotFound(pid) => write!(f, "JVM process {} not found or access denied", pid),
+            JvmMonitorError::ProcessNotFound(pid) => {
+                write!(f, "JVM process {} not found or access denied", pid)
+            }
             JvmMonitorError::IoError(e) => write!(f, "IO Error: {}", e),
             JvmMonitorError::InvalidFormat(msg) => write!(f, "Invalid hsperfdata format: {}", msg),
         }
@@ -46,6 +48,15 @@ struct EntryMeta {
     vector_length: usize,
 }
 
+/// Info struct for auto-discovered processes (like jps)
+#[derive(Debug, Clone)]
+pub struct JavaProcessInfo {
+    pub pid: u32,
+    pub name: String,     // Short name (Main Class or Jar)
+    pub command: String,  // Full command line
+    pub uptime_s: u64,    // Uptime in seconds
+}
+
 /// The main JVM Monitor instance
 pub struct JvmMonitor {
     mmap: Mmap,
@@ -57,8 +68,7 @@ pub struct JvmMonitor {
 impl JvmMonitor {
     /// Connects to a running JVM process
     pub fn connect(pid: u32) -> Result<Self, JvmMonitorError> {
-        let path = Self::find_hsperfdata_file(pid)
-            .ok_or(JvmMonitorError::ProcessNotFound(pid))?;
+        let path = Self::find_hsperfdata_file(pid).ok_or(JvmMonitorError::ProcessNotFound(pid))?;
 
         let file = fs::File::open(&path)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
@@ -80,12 +90,25 @@ impl JvmMonitor {
         let mut current_offset = entry_offset;
 
         for _ in 0..num_entries {
-            if current_offset + 20 > mmap.len() { break; }
-            let entry_length = Self::read_u32(&mmap[current_offset..current_offset + 4], is_little_endian) as usize;
-            let name_offset = Self::read_u32(&mmap[current_offset + 4..current_offset + 8], is_little_endian) as usize;
-            let vector_length = Self::read_u32(&mmap[current_offset + 8..current_offset + 12], is_little_endian) as usize;
+            if current_offset + 20 > mmap.len() {
+                break;
+            }
+            let entry_length =
+                Self::read_u32(&mmap[current_offset..current_offset + 4], is_little_endian)
+                    as usize;
+            let name_offset = Self::read_u32(
+                &mmap[current_offset + 4..current_offset + 8],
+                is_little_endian,
+            ) as usize;
+            let vector_length = Self::read_u32(
+                &mmap[current_offset + 8..current_offset + 12],
+                is_little_endian,
+            ) as usize;
             let data_type = mmap[current_offset + 12];
-            let data_offset = Self::read_u32(&mmap[current_offset + 16..current_offset + 20], is_little_endian) as usize;
+            let data_offset = Self::read_u32(
+                &mmap[current_offset + 16..current_offset + 20],
+                is_little_endian,
+            ) as usize;
 
             let name_start = current_offset + name_offset;
             let mut name_end = name_start;
@@ -94,16 +117,24 @@ impl JvmMonitor {
             }
             let name = String::from_utf8_lossy(&mmap[name_start..name_end]).into_owned();
 
-            index.insert(name, EntryMeta {
-                data_type,
-                data_offset: current_offset + data_offset,
-                vector_length,
-            });
+            index.insert(
+                name,
+                EntryMeta {
+                    data_type,
+                    data_offset: current_offset + data_offset,
+                    vector_length,
+                },
+            );
 
             current_offset += entry_length;
         }
 
-        let mut monitor = Self { mmap, is_little_endian, index, timer_frequency: 0.0 };
+        let mut monitor = Self {
+            mmap,
+            is_little_endian,
+            index,
+            timer_frequency: 0.0,
+        };
         // Cache the timer frequency for time conversions
         monitor.timer_frequency = monitor.read_long("sun.os.hrt.frequency") as f64;
         Ok(monitor)
@@ -117,7 +148,10 @@ impl JvmMonitor {
         if meta.data_type == b'J' && start + 8 <= self.mmap.len() {
             let val = Self::read_i64(&self.mmap[start..start + 8], self.is_little_endian);
             Some(PerfValue::Long(val))
-        } else if meta.data_type == b'B' && meta.vector_length > 0 && start + meta.vector_length <= self.mmap.len() {
+        } else if meta.data_type == b'B'
+            && meta.vector_length > 0
+            && start + meta.vector_length <= self.mmap.len()
+        {
             let mut end = start;
             let limit = start + meta.vector_length;
             while end < limit && self.mmap[end] != 0 {
@@ -132,7 +166,11 @@ impl JvmMonitor {
 
     // Helper: Read Long (i64), return 0 if missing
     pub fn read_long(&self, key: &str) -> i64 {
-        if let Some(PerfValue::Long(v)) = self.read_metric(key) { v } else { 0 }
+        if let Some(PerfValue::Long(v)) = self.read_metric(key) {
+            v
+        } else {
+            0
+        }
     }
 
     // Helper: Read Float (f64), return 0.0 if missing
@@ -142,7 +180,21 @@ impl JvmMonitor {
 
     // Helper: Read String, return "-" if missing
     pub fn read_string(&self, key: &str) -> String {
-        if let Some(PerfValue::String(v)) = self.read_metric(key) { v } else { "-".to_string() }
+        if let Some(PerfValue::String(v)) = self.read_metric(key) {
+            v
+        } else {
+            "-".to_string()
+        }
+    }
+
+    fn read_long_first_available(&self, candidates: &[&str]) -> i64 {
+        for key in candidates {
+            let val = self.read_long(key);
+            if val > 0 {
+                return val;
+            }
+        }
+        0
     }
 
     // Helper: Convert Ticks to Seconds
@@ -188,18 +240,43 @@ impl JvmMonitor {
 
     /// Get Full GC Statistics (jstat -gc / -gccause / -gcutil)
     pub fn get_gc_stats(&self) -> GcStats {
-        let s0c = self.read_long("sun.gc.generation.0.space.1.capacity");
-        let s1c = self.read_long("sun.gc.generation.0.space.2.capacity");
+        let s0c = self.read_long_first_available(&[
+            "sun.gc.generation.0.space.1.capacity",
+            "sun.gc.generation.0.space.1.maxCapacity",
+        ]);
+        let s1c = self.read_long_first_available(&[
+            "sun.gc.generation.0.space.2.capacity",
+            "sun.gc.generation.0.space.2.maxCapacity",
+        ]);
         let s0u = self.read_long("sun.gc.generation.0.space.1.used");
         let s1u = self.read_long("sun.gc.generation.0.space.2.used");
-        let ec = self.read_long("sun.gc.generation.0.space.0.capacity");
+        let ec = self.read_long_first_available(&[
+            "sun.gc.generation.0.space.0.capacity",
+            "sun.gc.generation.0.capacity",
+        ]);
         let eu = self.read_long("sun.gc.generation.0.space.0.used");
-        
-        let oc = self.read_long("sun.gc.generation.1.space.0.capacity");
-        let ou = self.read_long("sun.gc.generation.1.space.0.used");
 
-        let mc = self.read_long("sun.gc.metaspace.capacity");
-        let mu = self.read_long("sun.gc.metaspace.used");
+        let oc = self.read_long_first_available(&[
+            "sun.gc.generation.1.space.0.capacity",
+            "sun.gc.generation.1.capacity",
+            "sun.gc.g1.old.capacity",
+        ]);
+        let ou = self.read_long_first_available(&[
+            "sun.gc.generation.1.space.0.used",
+            "sun.gc.generation.1.used",
+            "sun.gc.g1.old.used",
+        ]);
+
+        let mc = self.read_long_first_available(&[
+            "sun.gc.metaspace.capacity",
+            "sun.gc.generation.2.space.0.capacity",
+            "sun.gc.generation.2.capacity",
+        ]);
+        let mu = self.read_long_first_available(&[
+            "sun.gc.metaspace.used",
+            "sun.gc.generation.2.space.0.used",
+            "sun.gc.generation.2.used",
+        ]);
         let ccsc = self.read_long("sun.gc.compressedclassspace.capacity");
         let ccsu = self.read_long("sun.gc.compressedclassspace.used");
 
@@ -207,7 +284,7 @@ impl JvmMonitor {
         let ygct = self.read_long("sun.gc.collector.0.time");
         let fgc = self.read_long("sun.gc.collector.1.invocations");
         let fgct = self.read_long("sun.gc.collector.1.time");
-        
+
         // ZGC or Shenandoah usually map to collector.2
         let cgc = self.read_long("sun.gc.collector.2.invocations");
         let cgct = self.read_long("sun.gc.collector.2.time");
@@ -241,32 +318,41 @@ impl JvmMonitor {
         // 1. Threads
         let t_live = self.read_long("java.threads.live");
         let t_daemon = self.read_long("java.threads.daemon");
-        let mut t_peak = self.read_long("java.threads.peak");
+        let mut t_peak = self.read_long_first_available(&[
+            "java.threads.peak",
+            "java.threads.livePeak",
+            "java.threads.peakCount",
+        ]);
         if t_peak == 0 {
-            t_peak = self.read_long("java.threads.peakCount");
-        }
-        if t_peak == 0 {
-            t_peak = self.read_long("java.threads.livePeak");
-        }
-        if t_peak == 0 {
-             t_peak = t_live;
+            t_peak = t_live;
         }
 
         // 2. Code Cache
         // note：sun.ci.codeCache or sun.ci.codeCache.maxSize
-        let cc_used = self.to_kb(self.read_long("sun.ci.codeCache.used"));
-        let cc_cap = self.to_kb(self.read_long("sun.ci.codeCache.capacity")); 
-        
+        let cc_used = self.to_kb(self.read_long_first_available(&[
+            "sun.ci.codeCache.used",
+            "sun.gc.generation.2.space.0.used",
+            "java.ci.totalCodeSize",
+        ]));
+        let cc_cap = self.to_kb(self.read_long_first_available(&[
+            "sun.ci.codeCache.capacity",
+            "sun.ci.codeCache.maxCapacity",
+            "sun.ci.codeCache.maxSize",
+            "sun.gc.generation.2.space.0.capacity",
+        ]));
+
         let cc_util = if cc_cap > 0.0 { cc_used / cc_cap } else { 0.0 };
 
         // 3. Safepoints
-        let safepoint_ticks = self.read_long("sun.rt.safepointTime");
+        let safepoint_ticks = self
+            .read_long_first_available(&["sun.rt.safepointTime", "sun.threads.vmOperationTime"]);
         let app_ticks = self.read_long("sun.rt.applicationTime");
-        let safepoints = self.read_long("sun.rt.safepoints");
+        let safepoints =
+            self.read_long_first_available(&["sun.rt.safepoints", "java.rt.safepoints"]);
 
         let safepoint_time_s = self.to_seconds(safepoint_ticks);
         let app_time_s = self.to_seconds(app_ticks);
-        
+
         let total_ticks = safepoint_ticks + app_ticks;
         let overhead = if total_ticks > 0 {
             safepoint_ticks as f64 / total_ticks as f64
@@ -287,30 +373,105 @@ impl JvmMonitor {
             safepoint_overhead: overhead,
         }
     }
-    
+
+    pub fn discover_all() -> Result<Vec<JavaProcessInfo>, JvmMonitorError> {
+        let base_dir = Self::get_temp_root();
+        let mut processes = Vec::new();
+
+        // Ensure base directory exists
+        if !base_dir.exists() {
+            return Ok(processes);
+        }
+
+        let entries = fs::read_dir(&base_dir).map_err(JvmMonitorError::IoError)?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+
+            // Find directories starting with "hsperfdata_"
+            if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
+                if folder_name.starts_with("hsperfdata_") {
+                    // Iterate through PIDs inside
+                    if let Ok(pid_entries) = fs::read_dir(&path) {
+                        for pid_entry in pid_entries.flatten() {
+                            let pid_path = pid_entry.path();
+                            if let Some(pid_str) = pid_path.file_name().and_then(|n| n.to_str()) {
+                                if let Ok(pid) = pid_str.parse::<u32>() {
+                                    // Try to connect to get details
+                                    if let Ok(monitor) = Self::connect(pid) {
+                                        let cmd = monitor.read_string("sun.rt.javaCommand");
+                                        // Extract main class or jar name
+                                        let short_name = cmd.split_whitespace().next().unwrap_or("Unknown").to_string();
+                                        
+                                        // Calculate approximate uptime
+                                        let uptime = monitor.to_seconds(monitor.read_long("sun.rt.applicationTime")) as u64;
+
+                                        processes.push(JavaProcessInfo {
+                                            pid,
+                                            name: short_name,
+                                            command: cmd,
+                                            uptime_s: uptime,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by PID
+        processes.sort_by_key(|k| k.pid);
+        Ok(processes)
+    }
 
     fn read_u32(bytes: &[u8], is_le: bool) -> u32 {
-        if is_le { LittleEndian::read_u32(bytes) } else { BigEndian::read_u32(bytes) }
+        if is_le {
+            LittleEndian::read_u32(bytes)
+        } else {
+            BigEndian::read_u32(bytes)
+        }
     }
 
     fn read_i64(bytes: &[u8], is_le: bool) -> i64 {
-        if is_le { LittleEndian::read_i64(bytes) } else { BigEndian::read_i64(bytes) }
+        if is_le {
+            LittleEndian::read_i64(bytes)
+        } else {
+            BigEndian::read_i64(bytes)
+        }
     }
 
-    // Platform Specific Logic
-    #[cfg(target_os = "linux")]
-    fn find_hsperfdata_file(pid: u32) -> Option<PathBuf> {
-        Self::scan_temp_dir(PathBuf::from("/tmp"), pid)
-    }
+   #[cfg(target_os = "linux")]
+    fn get_temp_root() -> PathBuf { PathBuf::from("/tmp") }
 
     #[cfg(target_os = "macos")]
-    fn find_hsperfdata_file(pid: u32) -> Option<PathBuf> {
-        Self::scan_temp_dir(std::env::temp_dir(), pid)
-    }
+    fn get_temp_root() -> PathBuf { std::env::temp_dir() }
 
     #[cfg(target_os = "windows")]
+    fn get_temp_root() -> PathBuf { std::env::temp_dir() }
+
     fn find_hsperfdata_file(pid: u32) -> Option<PathBuf> {
-        Self::scan_temp_dir(std::env::temp_dir(), pid)
+        let base_dir = Self::get_temp_root();
+        let pid_str = pid.to_string();
+
+        if let Ok(entries) = fs::read_dir(&base_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(folder_name) = path.file_name().and_then(|n| n.to_str()) {
+                        if folder_name.starts_with("hsperfdata_") {
+                            let target_file = path.join(&pid_str);
+                            if target_file.exists() {
+                                return Some(target_file);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn scan_temp_dir(base_dir: PathBuf, pid: u32) -> Option<PathBuf> {
@@ -343,7 +504,7 @@ pub struct ClassStats {
     pub bytes: f64, // KB
     pub unloaded: i64,
     pub unloaded_bytes: f64, // KB
-    pub time: f64, // Seconds
+    pub time: f64,           // Seconds
 }
 
 /// jstat -compiler
@@ -361,17 +522,28 @@ pub struct CompilerStats {
 #[derive(Debug, Clone, Default)]
 pub struct GcStats {
     // Survivor
-    pub s0c: f64, pub s1c: f64, pub s0u: f64, pub s1u: f64,
+    pub s0c: f64,
+    pub s1c: f64,
+    pub s0u: f64,
+    pub s1u: f64,
     // Eden
-    pub ec: f64, pub eu: f64,
+    pub ec: f64,
+    pub eu: f64,
     // Old
-    pub oc: f64, pub ou: f64,
+    pub oc: f64,
+    pub ou: f64,
     // Metaspace / Compressed Class
-    pub mc: f64, pub mu: f64, pub ccsc: f64, pub ccsu: f64,
+    pub mc: f64,
+    pub mu: f64,
+    pub ccsc: f64,
+    pub ccsu: f64,
     // Events
-    pub ygc: u64, pub ygct: f64,
-    pub fgc: u64, pub fgct: f64,
-    pub cgc: u64, pub cgct: f64, // Concurrent GC (ZGC/Shenandoah)
+    pub ygc: u64,
+    pub ygct: f64,
+    pub fgc: u64,
+    pub fgct: f64,
+    pub cgc: u64,
+    pub cgct: f64, // Concurrent GC (ZGC/Shenandoah)
     pub gct: f64,
     // Causes
     pub lgcc: String, // Last GC Cause
@@ -387,13 +559,13 @@ pub struct RuntimeStats {
     pub threads_peak: i64,
 
     // Code Cache (JIT Memory)
-    pub code_cache_used: f64,      // KB
-    pub code_cache_capacity: f64,  // KB
+    pub code_cache_used: f64,        // KB
+    pub code_cache_capacity: f64,    // KB
     pub code_cache_utilization: f64, // Percentage (0.0 - 1.0)
 
     // Safepoints (STW Pauses)
     pub safepoints: i64,
-    pub safepoint_time_s: f64,     // Seconds
-    pub app_time_s: f64,           // Seconds
-    pub safepoint_overhead: f64,   // Percentage (0.0 - 1.0)
+    pub safepoint_time_s: f64,   // Seconds
+    pub app_time_s: f64,         // Seconds
+    pub safepoint_overhead: f64, // Percentage (0.0 - 1.0)
 }

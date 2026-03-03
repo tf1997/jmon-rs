@@ -32,7 +32,7 @@ fn main() {
     // 2. Continuous Live Monitoring loop
     for _ in 0..10 { // Monitor for 10 seconds as an example
         // Fetch structured GC metrics instantly via zero-copy read
-        let gc = monitor.get_gc_metrics();
+        let gc = monitor.get_gc_stats();
         
         println!("{:<8.1} {:<8.1} {:<8} {:<8}", 
             gc.eu, gc.ou, gc.ygc, gc.fgc
