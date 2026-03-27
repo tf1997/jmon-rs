@@ -57,7 +57,7 @@ fn run_discovery_mode() {
                     let gc = monitor.get_gc_stats();
                     let rt = monitor.get_runtime_stats();
                     
-                    // 计算堆使用量 (Eden + Old + Survivors)
+                    // Eden + Old + Survivors)
                     let heap_used_kb = gc.eu + gc.ou + gc.s0u + gc.s1u;
                     let heap_str = format!("{:.1} MB", heap_used_kb / 1024.0);
                     

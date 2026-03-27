@@ -165,7 +165,11 @@ impl JvmMonitor {
         #[cfg(target_os = "linux")]
         {
             if let Ok(entries) = fs::read_dir("/proc") {
-                for entry in entries.flatten() {
+                for entry_result in entries {
+                    let entry = match entry_result {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
                     let pid_str = entry.file_name().to_string_lossy().into_owned();
                     if pid_str.chars().all(|c| c.is_ascii_digit()) {
                         let host_pid: u32 = pid_str.parse().unwrap_or(0);
@@ -205,7 +209,11 @@ impl JvmMonitor {
         // Fallback: Scan base temp directory for other users' hsperfdata folders
         if processes.is_empty() {
             if let Ok(entries) = fs::read_dir(&base_tmp) {
-                for entry in entries.flatten() {
+                for entry_result in entries {
+                    let entry = match entry_result {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
                     let path = entry.path();
                     if path.is_dir()
                         && path
@@ -228,7 +236,12 @@ impl JvmMonitor {
         seen: &mut HashSet<u32>,
     ) {
         if let Ok(p_entries) = fs::read_dir(folder) {
-            for p_entry in p_entries.flatten() {
+            for p_entry_result in p_entries {
+                let p_entry = match p_entry_result {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
+
                 if let Ok(pid) = p_entry.file_name().to_string_lossy().parse::<u32>() {
                     if !seen.contains(&pid) {
                         if let Some(name) = Self::fast_extract_name(&p_entry.path()) {
@@ -250,9 +263,14 @@ impl JvmMonitor {
         use std::io::{BufRead, BufReader};
         let file = fs::File::open(format!("/proc/{}/status", host_pid)).ok()?;
         let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
-            if line.starts_with("NSpid:") {
-                return line.split_whitespace().last().and_then(|s| s.parse().ok());
+        for line_result in reader.lines() {
+            match line_result {
+                Ok(line) => {
+                    if line.starts_with("NSpid:") {
+                        return line.split_whitespace().last().and_then(|s| s.parse().ok());
+                    }
+                }
+                Err(_) => break,
             }
         }
         None
@@ -277,7 +295,11 @@ impl JvmMonitor {
     fn find_perf_file_in_dir(base_path: &PathBuf, target_pid: u32) -> Option<PathBuf> {
         let pid_str = target_pid.to_string();
         let entries = fs::read_dir(base_path).ok()?;
-        for entry in entries.flatten() {
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
             let path = entry.path();
             if path.is_dir()
                 && path
@@ -410,10 +432,10 @@ impl JvmMonitor {
     /// Retrieves class loading statistics, equivalent to `jstat -class`.
     pub fn get_class_stats(&self) -> ClassStats {
         ClassStats {
-            loaded: self.read_long("java.cls.loadedClasses"),
-            bytes: self.to_kb(self.read_long("java.cls.loadedBytes")),
-            unloaded: self.read_long("java.cls.unloadedClasses"),
-            unloaded_bytes: self.to_kb(self.read_long("java.cls.unloadedBytes")),
+            loaded: self.read_long("sun.cls.loadedClasses"),
+            bytes: self.to_kb(self.read_long("sun.cls.loadedBytes")),
+            unloaded: self.read_long("sun.cls.unloadedClasses"),
+            unloaded_bytes: self.to_kb(self.read_long("sun.cls.unloadedBytes")),
             time: self.to_seconds(self.read_long("sun.cls.time")),
         }
     }

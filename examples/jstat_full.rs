@@ -28,16 +28,12 @@ fn main() {
     println!("--------------------------------------------------");
 
     loop {
-        // 1. 获取 Class 指标
+
         let cls = monitor.get_class_stats();
-        // 2. 获取 Compiler 指标
         let comp = monitor.get_compiler_stats();
-        // 3. 获取 GC 指标
         let gc = monitor.get_gc_stats();
-        // 4. 新增：获取 Runtime 指标
         let rt = monitor.get_runtime_stats();
 
-        // 打印线程信息
         println!("\n[Threads & CodeCache]");
         println!("{:<10} {:<10} {:<10} | {:<12} {:<12} {:<10}", 
             "Live", "Daemon", "Peak", "CC Used(KB)", "CC Max(KB)", "Util%");
@@ -45,26 +41,22 @@ fn main() {
             rt.threads_live, rt.threads_daemon, rt.threads_peak,
             rt.code_cache_used, rt.code_cache_capacity, rt.code_cache_utilization * 100.0);
 
-        // 打印 Safepoint 信息 (这是 jstat 看不到的高级货)
         println!("\n[Safepoints (STW Analysis)]");
         println!("{:<10} {:<12} {:<12} {:<12}", 
             "Count", "SP Time(s)", "App Time(s)", "Overhead%");
         println!("{:<10} {:<12.3} {:<12.3} {:<12.4}%", 
             rt.safepoints, rt.safepoint_time_s, rt.app_time_s, rt.safepoint_overhead * 100.0);
 
-        // 模拟 jstat -class 输出
         println!("\n[Class Loading]");
         println!("{:<10} {:<10} {:<10} {:<10} {:<10}", "Loaded", "Bytes(KB)", "Unloaded", "Bytes(KB)", "Time(s)");
         println!("{:<10} {:<10.1} {:<10} {:<10.1} {:<10.3}", 
             cls.loaded, cls.bytes, cls.unloaded, cls.unloaded_bytes, cls.time);
 
-        // 模拟 jstat -compiler 输出
         println!("\n[JIT Compiler]");
         println!("{:<10} {:<10} {:<10} {:<10} {:<20}", "Compiled", "Failed", "Invalid", "Time(s)", "LastFailed");
         println!("{:<10} {:<10} {:<10} {:<10.3} {:<20}", 
             comp.compiled, comp.failed, comp.invalid, comp.time, comp.failed_type);
 
-        // 模拟 jstat -gc / -gccause 输出
         println!("\n[Garbage Collection]");
         println!("{:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8} {:<8}", 
             "S0C", "S1C", "S0U", "S1U", "EC", "EU", "OC", "OU", "MC");
