@@ -25,6 +25,12 @@ cargo build --release
 
 The binary will be available at `./target/release/jmon`.
 
+### From crates.io
+
+```bash
+cargo install jmon-rs
+```
+
 ## Usage
 
 ### Command Line Interface
@@ -55,7 +61,7 @@ Add `jmon-rs` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-jmon-rs = { path = "path/to/jmon-rs" }
+jmon-rs = "0.1.5"
 ```
 
 Example code:
@@ -66,14 +72,13 @@ use jmon_rs::JvmMonitor;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pid = 12345; // Replace with an actual JVM PID
     let monitor = JvmMonitor::connect(pid)?;
+    let snapshot = monitor.sample()?;
 
-    let gc_stats = monitor.get_gc_stats();
-    println!("Eden Used: {} KB", gc_stats.eu);
-    println!("Old Used: {} KB", gc_stats.ou);
-    println!("Total GC Time: {}s", gc_stats.gct);
+    println!("Eden Used: {} KB", snapshot.gc.eu);
+    println!("Old Used: {} KB", snapshot.gc.ou);
+    println!("Total GC Time: {}s", snapshot.gc.gct);
 
-    let rt_stats = monitor.get_runtime_stats();
-    println!("Live Threads: {}", rt_stats.threads_live);
+    println!("Live Threads: {}", snapshot.runtime.threads_live);
 
     Ok(())
 }
@@ -98,11 +103,8 @@ fn scrape(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
 
 Do not call `connect()` or `discover_all()` for every individual metric read.
 For very high sampling rates, prefer `get_gc_numeric_stats()` and
-`get_compiler_numeric_stats()` and collect diagnostic strings less frequently.
-See [High-frequency and long-running hardening](docs/performance-hardening.md)
-for the blocking model, migration guidance, benchmarks, and residual risks. See
-[JVM PerfData key compatibility](docs/jvm-key-compatibility.md) for OpenJDK
-8/11/17/21 key resolution, collector semantics, and missing-metric handling.
+`get_compiler_numeric_stats()` after an explicit `refresh()` and collect
+diagnostic strings less frequently.
 
 ## Metrics Collected
 

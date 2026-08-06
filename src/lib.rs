@@ -9,10 +9,14 @@
 //! ```rust,no_run
 //! use jmon_rs::JvmMonitor;
 //!
-//! let pid = 12345;
-//! let monitor = JvmMonitor::connect(pid).expect("Failed to connect");
-//! let gc = monitor.get_gc_stats();
-//! println!("Eden Used: {} KB", gc.eu);
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let pid = 12345;
+//!     let monitor = JvmMonitor::connect(pid)?;
+//!     let snapshot = monitor.sample()?;
+//!     println!("Eden Used: {} KB", snapshot.gc.eu);
+//!     println!("Live Threads: {}", snapshot.runtime.threads_live);
+//!     Ok(())
+//! }
 //! ```
 //!
 //! Long-running collectors should reuse the monitor and call
