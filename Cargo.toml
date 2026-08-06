@@ -13,6 +13,7 @@ categories = ["development-tools::profiling", "api-bindings"]
 exclude = [
     ".github",
     ".gitignore",
+    "docs/*",
     "images/*",
     "test_data/*"
 ]
