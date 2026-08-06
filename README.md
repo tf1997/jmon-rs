@@ -1,12 +1,12 @@
 # jmon-rs
 
-High-performance, zero-copy JVM monitor and library for Rust, powered by `hsperfdata`.
+High-performance JVM monitor and library for Rust, powered by `hsperfdata` shared memory.
 
 `jmon-rs` is a lightweight tool and library that provides real-time access to JVM performance metrics without the overhead of JMX or attaching agents. It reads JVM's shared memory performance data (`hsperfdata`) directly, making it extremely fast and efficient.
 
 ## Features
 
-- **Zero-Copy Performance**: Directly maps JVM shared memory for O(1) metric lookups.
+- **Direct Counter Reads**: Maps JVM shared memory and pre-resolves built-in numeric counter offsets.
 - **Low Overhead**: No JMX, no agents, and no network communication required.
 - **Rich Metrics**: Access GC stats, class loading, JIT compilation, threads, safepoints, and more.
 - **Auto-Discovery**: Built-in discovery mode to list all running Java processes on the system.
@@ -32,7 +32,7 @@ The binary will be available at `./target/release/jmon`.
 `jmon` provides two modes: Discovery Mode and Monitor Mode.
 
 #### 1. Discovery Mode
-List all running Java processes and their basic stats (PID, Name, Uptime, Heap, Threads, GC Time).
+List running Java processes and their basic stats (PID, Name, Heap, Threads, GC Time).
 
 ```bash
 jmon
@@ -74,18 +74,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rt_stats = monitor.get_runtime_stats();
     println!("Live Threads: {}", rt_stats.threads_live);
-    
+
     Ok(())
 }
 ```
 
+For a long-running collector, reuse one monitor per PID and use the checked
+sampling API so lifecycle changes and newly-added counters can be handled
+explicitly. Linux additionally checks the process start-time when `/proc` is
+readable; lifecycle identity checks on macOS and Windows are best-effort.
+
+```rust,no_run
+use jmon_rs::JvmMonitor;
+
+fn scrape(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let monitor = JvmMonitor::connect(pid)?;
+    loop {
+        let snapshot = monitor.sample()?;
+        println!("heap old used: {} KB", snapshot.gc.ou);
+    }
+}
+```
+
+Do not call `connect()` or `discover_all()` for every individual metric read.
+For very high sampling rates, prefer `get_gc_numeric_stats()` and
+`get_compiler_numeric_stats()` and collect diagnostic strings less frequently.
+See [High-frequency and long-running hardening](docs/performance-hardening.md)
+for the blocking model, migration guidance, benchmarks, and residual risks. See
+[JVM PerfData key compatibility](docs/jvm-key-compatibility.md) for OpenJDK
+8/11/17/21 key resolution, collector semantics, and missing-metric handling.
+
 ## Metrics Collected
 
-- **Garbage Collection**: Survivor (S0/S1), Eden, Old Gen, Metaspace, Compressed Class Space usage and capacities. YGC, FGC, CGC counts and times.
-- **Runtime**: Thread counts (Live/Daemon/Peak), Safepoint counts and times, Application uptime.
+- **Garbage Collection**: jstat-compatible generation/space values, Metaspace, Compressed Class Space, and optional collector 0/1/2 counters with their actual JVM names.
+- **Runtime**: Thread counts (Live/Daemon/Peak), Safepoint counters/times, and application-time ticks.
 - **Class Loading**: Loaded/Unloaded class counts and memory usage.
 - **JIT Compiler**: Compilation counts, times, and failure details.
-- **Code Cache**: JIT Code Cache usage and utilization.
+- **Code Cache**: Exact vendor counters when published; standard OpenJDK PerfData reports this capability as unavailable instead of substituting another memory pool.
 
 ## Permissions
 

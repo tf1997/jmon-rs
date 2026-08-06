@@ -9,7 +9,7 @@ fn main() {
         eprintln!("Usage: cargo run --example demo_monitor <pid>");
         return;
     }
-    
+
     let pid: u32 = args[1].parse().expect("PID must be a number");
 
     // 1. Initialize connection (Only parses offsets once!)
@@ -25,18 +25,24 @@ fn main() {
     if let Some(PerfValue::String(cmd)) = monitor.read_metric("sun.rt.javaCommand") {
         println!("Connected to JVM Command: {}", cmd);
     }
-    
-    println!("{:<8} {:<8} {:<8} {:<8}", "EU (KB)", "OU (KB)", "YGC", "FGC");
+
+    println!(
+        "{:<8} {:<8} {:<8} {:<8}",
+        "EU (KB)", "OU (KB)", "YGC", "FGC"
+    );
     println!("-----------------------------------------");
 
     // 2. Continuous Live Monitoring loop
-    for _ in 0..10 { // Monitor for 10 seconds as an example
-        // Fetch structured GC metrics instantly via zero-copy read
+    for _ in 0..10 {
+        // Monitor for 10 seconds as an example
+        if let Err(error) = monitor.refresh() {
+            eprintln!("Monitoring stopped: {}", error);
+            break;
+        }
+        // Fetch structured GC metrics via pre-resolved shared-memory offsets.
         let gc = monitor.get_gc_stats();
-        
-        println!("{:<8.1} {:<8.1} {:<8} {:<8}", 
-            gc.eu, gc.ou, gc.ygc, gc.fgc
-        );
+
+        println!("{:<8.1} {:<8.1} {:<8} {:<8}", gc.eu, gc.ou, gc.ygc, gc.fgc);
 
         thread::sleep(Duration::from_secs(1));
     }

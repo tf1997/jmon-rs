@@ -1,9 +1,9 @@
 [package]
 name = "jmon-rs"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 authors = ["tf1997 <ctf19970503@gmail.com>"]
-description = "A zero-copy, cross-platform JVM monitoring library (similar to jstat) in Rust."
+description = "A high-performance, cross-platform JVM monitoring library (similar to jstat) in Rust."
 license = "Apache-2.0"
 repository = "https://github.com/tf1997/jmon-rs"
 readme = "README.md"
@@ -24,3 +24,7 @@ byteorder = "1.5"
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[bench]]
+name = "sampling"
+harness = false
