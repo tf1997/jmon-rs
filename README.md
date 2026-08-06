@@ -61,7 +61,7 @@ Add `jmon-rs` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-jmon-rs = "0.1.5"
+jmon-rs = "0.1.6"
 ```
 
 Example code:
@@ -91,20 +91,27 @@ readable; lifecycle identity checks on macOS and Windows are best-effort.
 
 ```rust,no_run
 use jmon_rs::JvmMonitor;
+use std::thread;
+use std::time::Duration;
 
 fn scrape(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     let monitor = JvmMonitor::connect(pid)?;
     loop {
+        // sample() refreshes target health and newly-published counters first.
         let snapshot = monitor.sample()?;
         println!("heap old used: {} KB", snapshot.gc.ou);
+        println!("live threads: {}", snapshot.runtime.threads_live);
+        thread::sleep(Duration::from_secs(1));
     }
 }
 ```
 
-Do not call `connect()` or `discover_all()` for every individual metric read.
-For very high sampling rates, prefer `get_gc_numeric_stats()` and
-`get_compiler_numeric_stats()` after an explicit `refresh()` and collect
-diagnostic strings less frequently.
+`sample()` calls `refresh()` internally, so do not call both in the same
+sampling cycle. Do not call `connect()` or `discover_all()` for every individual
+metric read. For very high sampling rates, call `refresh()` explicitly and then
+use only the required direct getters, such as `get_gc_numeric_stats()` and
+`get_compiler_numeric_stats()`. Direct getters are not deprecated, but they do
+not check target lifecycle or discover newly-published counters by themselves.
 
 ## Metrics Collected
 

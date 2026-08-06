@@ -4,24 +4,29 @@
 //! It retrieves real-time JVM metrics (GC, class loading, memory, etc.) by
 //! parsing `hsperfdata` memory-mapped files.
 //!
-//! ## Example
+//! ## Continuous sampling
 //!
 //! ```rust,no_run
 //! use jmon_rs::JvmMonitor;
+//! use std::thread;
+//! use std::time::Duration;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let pid = 12345;
 //!     let monitor = JvmMonitor::connect(pid)?;
-//!     let snapshot = monitor.sample()?;
-//!     println!("Eden Used: {} KB", snapshot.gc.eu);
-//!     println!("Live Threads: {}", snapshot.runtime.threads_live);
-//!     Ok(())
+//!     loop {
+//!         let snapshot = monitor.sample()?;
+//!         println!("Eden Used: {} KB", snapshot.gc.eu);
+//!         println!("Live Threads: {}", snapshot.runtime.threads_live);
+//!         thread::sleep(Duration::from_secs(1));
+//!     }
 //! }
 //! ```
 //!
-//! Long-running collectors should reuse the monitor and call
-//! [`JvmMonitor::sample`] or [`JvmMonitor::refresh`] once per sampling cycle so
-//! target exit and newly-published counters are handled explicitly.
+//! [`JvmMonitor::sample`] calls [`JvmMonitor::refresh`] internally. Most
+//! long-running collectors should reuse one monitor and call only `sample()`
+//! once per cycle. Advanced collectors can call `refresh()` explicitly before
+//! selected direct `get_*` reads when they do not need a complete snapshot.
 
 mod perfdata;
 #[cfg(test)]
@@ -686,6 +691,10 @@ impl JvmMonitor {
     /// Returns the number of newly indexed counters. Existing HotSpot entries
     /// are append-only; a removed or relocated entry is treated as corruption
     /// rather than silently replacing a live offset.
+    ///
+    /// Most long-running collectors should call [`JvmMonitor::sample`], which
+    /// invokes this method automatically. Call `refresh()` directly only when
+    /// reading selected direct getters instead of a complete snapshot.
     pub fn refresh(&self) -> Result<usize, JvmMonitorError> {
         self.validate_target_identity()?;
         let mut state = self
@@ -827,8 +836,9 @@ impl JvmMonitor {
     /// Validates the target, refreshes structural metadata, and reads all
     /// high-level metric groups.
     ///
-    /// Long-running collectors should prefer this fallible API over calling
-    /// the compatibility `get_*` methods without a periodic health check.
+    /// This method calls [`JvmMonitor::refresh`] internally. Long-running
+    /// collectors should call it once per sampling cycle and should not call
+    /// `refresh()` separately in the same cycle.
     pub fn sample(&self) -> Result<JvmStatsSnapshot, JvmMonitorError> {
         self.refresh()?;
         let state = self
@@ -1396,6 +1406,10 @@ impl JvmMonitor {
     // ==========================================
 
     /// Retrieves class loading statistics, equivalent to `jstat -class`.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_class_stats(&self) -> ClassStats {
         let loaded = self
             .read_known_long(BuiltinLongMetric::LoadedClasses)
@@ -1419,6 +1433,10 @@ impl JvmMonitor {
     }
 
     /// Retrieves allocation-free numeric JIT compiler statistics.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_compiler_numeric_stats(&self) -> CompilerNumericStats {
         CompilerNumericStats {
             compiled: self.read_known_long(BuiltinLongMetric::Compilations),
@@ -1429,6 +1447,10 @@ impl JvmMonitor {
     }
 
     /// Retrieves JIT compiler statistics, equivalent to `jstat -compiler`.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_compiler_stats(&self) -> CompilerStats {
         let numeric = self.get_compiler_numeric_stats();
         CompilerStats {
@@ -1447,6 +1469,10 @@ impl JvmMonitor {
     /// zero. Use [`JvmMonitor::read_builtin_long`] or
     /// [`JvmMonitor::get_gc_collector_numeric_stats`] when missing-versus-zero
     /// must be preserved.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_gc_numeric_stats(&self) -> GcNumericStats {
         let s0c = self.read_known_long(BuiltinLongMetric::Survivor0Capacity);
         let s1c = self.read_known_long(BuiltinLongMetric::Survivor1Capacity);
@@ -1502,6 +1528,10 @@ impl JvmMonitor {
     /// mixed JDK and GC fleets. A missing slot remains `None`, while a
     /// published zero remains `Some(0)`. Call [`JvmMonitor::compatibility`]
     /// once to obtain each slot's collector name.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_gc_collector_numeric_stats(&self) -> [GcCollectorNumericStats; 3] {
         const COUNT_METRICS: [BuiltinLongMetric; 3] = [
             BuiltinLongMetric::Collector0Invocations,
@@ -1529,6 +1559,10 @@ impl JvmMonitor {
     }
 
     /// Retrieves garbage collection statistics, equivalent to `jstat -gc` or `jstat -gccause`.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_gc_stats(&self) -> GcStats {
         let numeric = self.get_gc_numeric_stats();
         GcStats {
@@ -1562,6 +1596,10 @@ impl JvmMonitor {
     /// occupancy/capacity. Those fields remain zero unless a vendor publishes
     /// the explicitly compatible `sun.ci.codeCache.*` keys; use
     /// [`JvmMonitor::metric_resolution`] to test availability.
+    ///
+    /// This direct getter does not refresh target health or structural metadata.
+    /// Use [`JvmMonitor::sample`] for checked persistent monitoring, or call
+    /// [`JvmMonitor::refresh`] before a group of direct reads.
     pub fn get_runtime_stats(&self) -> RuntimeStats {
         // 1. Threads
         let t_live = self.read_known_long(BuiltinLongMetric::ThreadsLive);
